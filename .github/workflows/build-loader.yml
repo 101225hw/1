@@ -1,0 +1,41 @@
+name: Build DaCaiBeiLoader
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'DaCaiBeiLoader.c'
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          set -eux
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -arch arm64e -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 -dynamiclib -fobjc-arc \
+            -framework Foundation -O2 -o out-arm64e.dylib DaCaiBeiLoader.c
+          xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 -dynamiclib -fobjc-arc \
+            -framework Foundation -O2 -o out-arm64.dylib DaCaiBeiLoader.c
+          lipo -create out-arm64e.dylib out-arm64.dylib -output DaCaiBeiLoader.dylib
+          ls -lh DaCaiBeiLoader.dylib
+          lipo -info DaCaiBeiLoader.dylib
+
+      - name: Sign
+        run: codesign --force --sign - DaCaiBeiLoader.dylib || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DaCaiBeiLoader
+          path: |
+            DaCaiBeiLoader.dylib
+            out-arm64e.dylib
+            out-arm64.dylib
