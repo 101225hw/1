@@ -1,13 +1,13 @@
 // ============================================================
 //  DaCaiBeiLoader.c —— 极简 dlopen loader（arm64e / arm64 通用）
-//  作用：被 TrollFools 注入（仅 ~15KB，重签零压力）
+//  作用：被 TrollFools 注入（仅 ~30KB，重签零压力）
 //        构造函数里 dlopen 外部的 FridaGadget.dylib（37.8MB，不重签）
-//  编译：clang -arch arm64e -arch arm64 -dynamiclib -o DaCaiBeiLoader.dylib
-//        -framework Foundation -mios-version-min=14.0 -fobjc-arc
+//  编译：分两个架构各编一次，再 lipo 合并（见 .github/workflows/build-loader.yml）
 // ============================================================
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <unistd.h>
 
 // 候选路径：gadget 放在哪就从哪加载（覆盖 TrollFools / TrollStore / 越狱三种布局）
 static NSString *const kGadgetName = @"FridaGadget.dylib";
@@ -41,23 +41,28 @@ static NSArray<NSString *> *CandidatePaths(void) {
     // ④ 越狱标准位置
     [a addObject:@"/usr/lib/dacaibei/FridaGadget.dylib"];
     [a addObject:@"/Library/MobileSubstrate/DynamicLibraries/FridaGadget.dylib"];
+    // ⑤ 我们自己的目录（顾客也可以放这里）
+    [a addObject:@"/var/mobile/Library/DaCaiBei/FridaGadget.dylib"];
 
     return a;
 }
 
 static void DCBLog(NSString *msg) {
-    NSMutableString *line = [NSMutableString stringWithFormat:
-        @"[%@] %@\n", [NSDate date], msg];
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    NSString *ts = [fmt stringFromDate:[NSDate date]];
 
-    NSMutableArray *pathes = [NSMutableArray array];
-    [pathes addObject:@"/tmp/dcb_loader.log"];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
+
+    NSMutableArray *paths = [NSMutableArray array];
+    [paths addObject:@"/tmp/dcb_loader.log"];
     NSString *docs = [NSSearchPathForDirectoriesInDomains(
                         NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     if (docs.length) {
-        [pathes addObject:[docs stringByAppendingPathComponent:@"dcb_loader.log"]];
+        [paths addObject:[docs stringByAppendingPathComponent:@"dcb_loader.log"]];
     }
 
-    for (NSString *p in pathes) {
+    for (NSString *p in paths) {
         FILE *f = fopen(p.UTF8String, "a");
         if (f) {
             fputs(line.UTF8String, f);
@@ -72,27 +77,47 @@ static void DCBLoaderInit(void) {
     @autoreleasepool {
         DCBLog(@"=== DCBLoader init ===");
         DCBLog([NSString stringWithFormat:@"pid=%d bundle=%@",
-                getpid(), AppBundlePath()]);
+                (int)[[NSProcessInfo processInfo] processIdentifier],
+                AppBundlePath()]);
+        DCBLog([NSString stringWithFormat:@"iOS=%@ model=%@",
+                [[UIDevice currentDevice] systemVersion],
+                [[UIDevice currentDevice] model]]);
 
         NSArray *cands = CandidatePaths();
+        BOOL loaded = NO;
+
         for (NSString *path in cands) {
             DCBLog([NSString stringWithFormat:@"try: %@", path]);
-            BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
-            if (!exists) {
-                DCBLog(@"  → 不存在");
+            if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                DCBLog(@"  -> not found");
                 continue;
+            }
+
+            NSError *attrErr = nil;
+            NSDictionary *attr = [[NSFileManager defaultManager]
+                                   attributesOfItemAtPath:path error:&attrErr];
+            if (attr) {
+                DCBLog([NSString stringWithFormat:@"  size=%llu bytes",
+                        [attr fileSize]]);
             }
 
             void *h = dlopen(path.UTF8String, RTLD_NOW | RTLD_GLOBAL);
             if (h) {
-                DCBLog([NSString stringWithFormat:@"  → ✓ dlopen 成功 (%p)", h]);
-                return;     // gadget 的构造函数会自动跑
+                DCBLog([NSString stringWithFormat:@"  -> dlopen OK (%p)", h]);
+                loaded = YES;
+                break;      // gadget 构造函数会自动跑
             } else {
                 const char *err = dlerror();
-                DCBLog([NSString stringWithFormat:@"  → ✗ dlopen 失败: %s",
+                DCBLog([NSString stringWithFormat:@"  -> dlopen FAILED: %s",
                         err ? err : "unknown"]);
             }
         }
-        DCBLog(@"=== 所有候选路径都失败 ===");
+
+        if (loaded) {
+            DCBLog(@"=== gadget loaded, waiting for its init ===");
+        } else {
+            DCBLog(@"=== ALL candidate paths failed ===");
+            DCBLog(@"=== 请确认 FridaGadget.dylib 已放入 Frameworks/ 目录 ===");
+        }
     }
 }
